@@ -1,0 +1,97 @@
+---
+- name: Génération des fichiers sécurisés sur le noeud Admin
+  hosts: weblogic_admin
+  vars:
+    domain_home: "/u01/domains/base_domain"
+    config_xml: "{{ domain_home }}/config/config.xml"
+    nm_username: "weblogic"
+    nm_host: "localhost"
+    nm_port: "5556"
+    secure_config_file: "/u01/secure/nmUserConfig"
+    secure_key_file: "/u01/secure/nmUserKey"
+    oracle_mw_home: "/u01/oracle/middleware"
+    wlst_path: "{{ oracle_mw_home }}/oracle_common/common/bin/wlst.sh"
+
+  tasks:
+    - name: Copier le script WLST de déchiffrement sur Admin
+      copy:
+        dest: /tmp/decrypt_password.py
+        mode: '0700'
+        content: |
+          from weblogic.security.internal import SerializedSystemIni
+          from weblogic.security.internal.encryption import ClearOrEncryptedService
+          import sys
+
+          domain_home = sys.argv[1]
+          encrypted_pass = sys.argv[2]
+
+          encryption_service = SerializedSystemIni.getEncryptionService(domain_home)
+          ces = ClearOrEncryptedService(encryption_service)
+
+          clear_pass = ces.decrypt(encrypted_pass)
+          print(clear_pass)
+
+    - name: Récupérer le password NodeManager crypté depuis config.xml sur Admin
+      xml:
+        path: "{{ config_xml }}"
+        xpath: "/domain/security-configuration/node-manager-password-encrypted"
+        content: text
+      register: xml_password
+
+    - name: Déchiffrer le mot de passe NodeManager via WLST sur Admin
+      shell: |
+        {{ wlst_path }} /tmp/decrypt_password.py "{{ domain_home }}" "{{ xml_password.matches[0].node }}"
+      register: decrypted_password
+      changed_when: false
+
+    - name: Générer les fichiers secureConfig et secureKeyFile via WLST sur Admin
+      shell: |
+        cat <<EOF > /tmp/gen_securefiles.wlst
+        nmConnect('{{ nm_username }}', '{{ decrypted_password.stdout }}', '{{ nm_host }}', '{{ nm_port }}', '{{ domain_home | basename }}', '{{ domain_home }}')
+        storeUserConfig('{{ secure_config_file }}', '{{ secure_key_file }}', nm='true')
+        nmDisconnect()
+        EOF
+        {{ wlst_path }} /tmp/gen_securefiles.wlst
+      args:
+        creates: "{{ secure_config_file }}"
+
+    - name: Sécuriser les permissions des fichiers générés sur Admin
+      file:
+        path: "{{ item }}"
+        mode: '0600'
+      loop:
+        - "{{ secure_config_file }}"
+        - "{{ secure_key_file }}"
+
+    - name: Nettoyer les fichiers temporaires sur Admin
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/decrypt_password.py
+        - /tmp/gen_securefiles.wlst
+
+- name: Distribution des fichiers sécurisés vers les noeuds Managés
+  hosts: weblogic_managed
+  vars:
+    secure_config_file: "/u01/secure/nmUserConfig"
+    secure_key_file: "/u01/secure/nmUserKey"
+
+  tasks:
+    - name: Copier le secureConfig depuis Admin vers Managés
+      copy:
+        src: "{{ secure_config_file }}"
+        dest: "{{ secure_config_file }}"
+        owner: oracle
+        group: oracle
+        mode: '0600'
+      delegate_to: "{{ groups['weblogic_admin'][0] }}"
+
+    - name: Copier le secureKeyFile depuis Admin vers Managés
+      copy:
+        src: "{{ secure_key_file }}"
+        dest: "{{ secure_key_file }}"
+        owner: oracle
+        group: oracle
+        mode: '0600'
+      delegate_to: "{{ groups['weblogic_admin'][0] }}"
