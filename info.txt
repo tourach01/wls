@@ -1,0 +1,8 @@
+# wlst.sh / wlst.cmd
+nmConnect('nmUser','nmPassword',
+          'nmHost','5556',
+          'mydomain','/path/to/domains/mydomain',
+          'SSL') 
+nmStart('AdminServer')
+
+
