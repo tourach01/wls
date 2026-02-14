@@ -1,0 +1,124 @@
+# 01_create_admin_machine.py
+# WLST Jython - Online ou Offline
+# - Crée/maj la Machine de l'AdminServer
+# - Configure NodeManagerMBean (ListenAddress/ListenPort/NMType)
+# - Assigne AdminServer à la Machine
+
+import sys
+
+ADMIN = {
+  'machineName': 'm_admin',
+  'nmListenAddress': 'adminhost.example.com',
+  'nmListenPort': 5556,
+  'nmType': 'SSL',  # 'SSL' (TLS) ou 'Plain'
+  'servers': ['AdminServer'],
+}
+
+def _println(m): print m
+
+def _cd_nodemanager(machine_name):
+  # Les docs WLST 15.1.1 utilisent "Machine/<name>/NodeManager/<name>" :contentReference[oaicite:3]{index=3}
+  # On garde un fallback "Machines/..." pour les environnements où l'arborescence diffère.
+  paths = [
+    'Machine/%s/NodeManager/%s' % (machine_name, machine_name),
+    'Machines/%s/NodeManager/%s' % (machine_name, machine_name),
+  ]
+  for p in paths:
+    try:
+      cd(p)
+      return p
+    except:
+      pass
+  raise Exception('Impossible de cd vers NodeManagerMBean pour la machine %s' % machine_name)
+
+def _get_machine_mbean(machine_name):
+  for p in ['Machine/%s' % machine_name, 'Machines/%s' % machine_name]:
+    m = getMBean(p)
+    if m is not None:
+      return m
+  return None
+
+def ensure_admin_machine(cfg):
+  mn = cfg['machineName']
+  cd('/')
+  if _get_machine_mbean(mn) is None:
+    create(mn, 'Machine')
+    _println('Created Machine: %s' % mn)
+
+  # NodeManagerMBean existe souvent automatiquement; sinon on le crée
+  nm_mbean = None
+  for p in ['Machine/%s/NodeManager/%s' % (mn, mn), 'Machines/%s/NodeManager/%s' % (mn, mn)]:
+    nm_mbean = getMBean(p)
+    if nm_mbean is not None:
+      break
+
+  if nm_mbean is None:
+    # création explicite du child NodeManager
+    try:
+      cd('Machine/%s' % mn)
+    except:
+      cd('Machines/%s' % mn)
+    create(mn, 'NodeManager')
+    _println('Created NodeManager child for Machine: %s' % mn)
+
+  _cd_nodemanager(mn)
+  set('ListenAddress', cfg.get('nmListenAddress', ''))
+  set('ListenPort', int(cfg.get('nmListenPort', 5556)))
+  set('NMType', cfg.get('nmType', 'SSL'))
+  _println('Configured NodeManager for %s: %s:%s (%s)' %
+           (mn, cfg.get('nmListenAddress'), cfg.get('nmListenPort'), cfg.get('nmType')))
+
+def assign_servers(cfg):
+  mn = cfg['machineName']
+  mach = _get_machine_mbean(mn)
+  if mach is None:
+    raise Exception('Machine introuvable: %s' % mn)
+
+  for s in cfg.get('servers', []):
+    srv = getMBean('Servers/%s' % s)
+    if srv is None:
+      _println('WARN: Server not found, skipping: %s' % s)
+      continue
+
+    cd('Servers/%s' % s)
+    cur = cmo.getMachine()
+    if cur is not None and cur.getName() == mn:
+      _println('OK: %s already assigned to %s' % (s, mn))
+      continue
+
+    # IMPORTANT: impossible si le serveur est RUNNING :contentReference[oaicite:4]{index=4}
+    cmo.setMachine(mach)
+    _println('Assigned: %s -> %s' % (s, mn))
+
+def apply_all():
+  ensure_admin_machine(ADMIN)
+  assign_servers(ADMIN)
+
+def usage():
+  _println("Usage:")
+  _println("  Offline (recommandé pour AdminServer): wlst.sh 01_create_admin_machine.py --offline <DOMAIN_HOME>")
+  _println("  Online : wlst.sh 01_create_admin_machine.py <admin_url> <user> <password>")
+  exit()
+
+if len(sys.argv) < 2:
+  usage()
+
+if sys.argv[1] == '--offline':
+  if len(sys.argv) < 3: usage()
+  readDomain(sys.argv[2])
+  apply_all()
+  updateDomain()
+  closeDomain()
+  _println("DONE (offline).")
+else:
+  if len(sys.argv) < 4: usage()
+  connect(sys.argv[2], sys.argv[3], sys.argv[1])
+  edit()
+  startEdit()
+  apply_all()
+  save()
+  activate(block='true')
+  disconnect()
+  _println("DONE (online).")
+
+exit()
